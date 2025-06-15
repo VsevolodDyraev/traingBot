@@ -1,2 +1,5 @@
 python-telegram-bot==20.7
-python-dotenv==1.0.0 
+python-dotenv==1.0.0
+moviepy==1.0.3
+pytubefix==4.0.0
+instaloader==4.10.1 

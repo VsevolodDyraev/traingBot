@@ -6,7 +6,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import config
 import os
 from datetime import datetime
-from moviepy import VideoFileClip
+from moviepy.editor import VideoFileClip
+# from moviepy import VideoFileClip
 from pytubefix import YouTube
 import instaloader
 import re
@@ -147,7 +148,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     clip = (
                         VideoFileClip(video_path)
-                        .subclipped(start_time, end_time)
+                        .subclip(start_time, end_time)
                     )
                     temp_path = video_path.replace('.mp4', '_trimmed.mp4')
                     clip.write_videofile(temp_path)
@@ -510,7 +511,7 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count_errors = 0
             
             # Удаляем сообщения, начиная с текущего
-            while message_id > 0 and count_errors < 10:
+            while message_id > 0 and count_errors < 500:
                 try:
                     # Пытаемся удалить сообщение
                     await context.bot.delete_message(
@@ -536,10 +537,7 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id -= 1
                     count_errors += 1
                     continue
-                
-                # Если удалено более 100 сообщений, останавливаемся
-                if deleted_count >= 100:
-                    break
+
             
             # Финальное сообщение
             await status_message.edit_text(
@@ -871,7 +869,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # YouTube
             await status_message.edit_text("⏳ Загружаю видео с YouTube...")
             try:
+                # Инициализируем YouTube
                 yt = YouTube(url)
+                
                 stream = None
                 # Пробуем получить поток с максимальным качеством
                 try:
@@ -900,7 +900,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             except Exception as e:
                 logger.error(f"Ошибка при скачивании с YouTube: {e}")
-                await status_message.edit_text("❌ Ошибка при скачивании видео с YouTube. Попробуйте другую ссылку.")
+                await status_message.edit_text(f"❌ Ошибка при скачивании видео с YouTube. {e}")
                 return
             
         elif 'instagram.com' in url:
