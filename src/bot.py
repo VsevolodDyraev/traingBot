@@ -11,6 +11,7 @@ from moviepy.editor import VideoFileClip
 from pytubefix import YouTube
 import instaloader
 import re
+import hashlib
 
 
 # Enable logging
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Максимальный размер файла (10 МБ в байтах)
 MAX_FILE_SIZE = 10 * 1024 * 1024
+
+# Максимальная длина callback_data для Telegram
+MAX_CALLBACK_DATA_LEN = 64
 
 # Словарь для хранения выбранной папки для каждого пользователя
 user_folders = {}
@@ -35,6 +39,16 @@ WAITING_FILENAME = 2
 WAITING_TRIM_START = 3
 WAITING_TRIM_END = 4
 WAITING_URL = 5
+
+def safe_callback_data(prefix, *args):
+    """Формирует безопасный callback_data для инлайн-кнопок Telegram."""
+    # Оставляем только буквы, цифры, подчеркивания и точки
+    safe_args = [re.sub(r'[^\w\.-]', '_', str(a)) for a in args]
+    data = prefix + '_' + '_'.join(safe_args)
+    return data[:MAX_CALLBACK_DATA_LEN]
+
+def get_file_id(folder, filename):
+    return hashlib.md5(f"{folder}/{filename}".encode()).hexdigest()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
@@ -82,6 +96,7 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при создании папки: {e}")
         await update.message.reply_text("Извините, произошла ошибка при создании папки.")
+        context.user_data.clear()
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages."""
@@ -92,21 +107,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
             os.makedirs(folder_path, exist_ok=True)
             await update.message.reply_text(f"Папка '{folder_name}' успешно создана!")
-            context.user_data['waiting_for_folder_name'] = False
+            context.user_data.clear()
         except Exception as e:
             logger.error(f"Ошибка при создании папки: {e}")
             await update.message.reply_text("Извините, произошла ошибка при создании папки.")
-            context.user_data['waiting_for_folder_name'] = False
+            context.user_data.clear()
     
     elif context.user_data.get('waiting_for_file_name'):
         try:
             file_name = update.message.text+".mp4"
             await save_video(update, context, file_name)
-            context.user_data['waiting_for_file_name'] = False
+            context.user_data.clear()
         except Exception as e:
             logger.error(f"Ошибка при создании файла: {e}")
             await update.message.reply_text("Извините, произошла ошибка при создании файла.")
-            context.user_data['waiting_for_file_name'] = False
+            context.user_data.clear()
     
     elif context.user_data.get('waiting_for_trim_start'):
         try:
@@ -164,7 +179,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Ошибка при обрезке видео: {e}")
                     await update.message.reply_text("Извините, произошла ошибка при обрезке видео.")
             
-            context.user_data['waiting_for_trim_end'] = False
+            context.user_data.clear()
         except ValueError:
             await update.message.reply_text("Пожалуйста, введите корректное число.")
     elif context.user_data.get('waiting_for_url'):
@@ -173,8 +188,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка при скачивании файла: {e}")
             await update.message.reply_text("Извините, произошла ошибка при скачивании файла.")
-            context.user_data['waiting_for_url'] = False
-        
+            context.user_data.clear()
+    else:
+        await update.message.reply_text("Команда с таким названием не найдена. Используйте /help для списка доступных команд.")
 
 async def list_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available folders."""
@@ -198,7 +214,7 @@ async def list_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([
                 InlineKeyboardButton(
                     f"📁 {folder} ({len(videos)} видео)", 
-                    callback_data=f"view_{folder}"
+                    callback_data=safe_callback_data("view", folder)
                 )
             ])
         
@@ -285,7 +301,7 @@ async def show_folder_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
         keyboard = []
         for folder in folders:
-            keyboard.append([InlineKeyboardButton(folder, callback_data=f"save_{folder}")])
+            keyboard.append([InlineKeyboardButton(folder, callback_data=safe_callback_data("save", folder))])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         message = "Выберите папку для сохранения видео:"
@@ -336,6 +352,7 @@ async def handle_filename_input(update: Update, context: ContextTypes.DEFAULT_TY
         filename += '.mp4'
     
     await save_video(update, context, filename)
+    context.user_data.clear()
     return ConversationHandler.END
 
 async def save_video(update: Update, context: ContextTypes.DEFAULT_TYPE, filename: str = None):
@@ -408,7 +425,7 @@ async def delete_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([
                 InlineKeyboardButton(
                     f"🗑 {folder} ({len(videos)} видео)", 
-                    callback_data=f"delete_{folder}"
+                    callback_data=safe_callback_data("delete", folder)
                 )
             ])
         
@@ -437,30 +454,22 @@ async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show folder selection for video deletion."""
+    """Показывает список папок для выбора удаления видео."""
     try:
-        folders = [f for f in os.listdir(config.RESOURCES_DIR) 
-                  if os.path.isdir(os.path.join(config.RESOURCES_DIR, f))]
-        
+        folders = [f for f in os.listdir(config.RESOURCES_DIR) if os.path.isdir(os.path.join(config.RESOURCES_DIR, f))]
         if not folders:
             await update.message.reply_text("Нет доступных папок для удаления видео.")
             return
-
+        # Формируем карту id -> имя папки
+        folder_map = {}
         keyboard = []
-        for folder in folders:
-            # Подсчет видео в папке
-            videos = [f for f in os.listdir(os.path.join(config.RESOURCES_DIR, folder)) 
-                     if f.endswith(('.mp4', '.avi', '.mov'))]
+        for i, folder in enumerate(folders):
+            folder_id = f"f{i}_{hashlib.md5(folder.encode()).hexdigest()[:8]}"
+            folder_map[folder_id] = folder
             keyboard.append([
-                InlineKeyboardButton(
-                    f"📁 {folder} ({len(videos)} видео)", 
-                    callback_data=f"select_delete_folder_{folder}"
-                )
+                InlineKeyboardButton(f"📁 {folder}", callback_data=f"delete_folder_{folder_id}")
             ])
-        
-        # Добавляем кнопку отмены
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete_video")])
-        
+        context.user_data['delete_folder_map'] = folder_map
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             "Выберите папку для удаления видео:",
@@ -471,12 +480,20 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Извините, произошла ошибка при получении списка папок.")
 
 async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle folder selection callback."""
     query = update.callback_query
     await query.answer()
     
     callback_data = query.data
-    
+ # --- Вспомогательные функции для поиска файла по id ---
+    def find_file_by_id(file_id):
+        for key in context.user_data:
+            if key.startswith("file_map_"):
+                file_map = context.user_data[key]
+                if file_id in file_map:
+                    folder_name = key.replace("file_map_", "")
+                    return folder_name, file_map[file_id]
+        return None, None
+
     if callback_data == "upload_full":
         # Показываем меню выбора папки
         await show_folder_selection(update, context)
@@ -497,6 +514,99 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Ошибка при получении длительности видео: {e}")
                 await query.edit_message_text("Извините, произошла ошибка при обработке видео.")
+    # --- Новый блок: удаление видео через выбор папки и файла ---
+    elif callback_data.startswith("delete_folder_"):
+        folder_id = callback_data.replace("delete_folder_", "")
+        folder_map = context.user_data.get('delete_folder_map', {})
+        folder_name = folder_map.get(folder_id)
+        if not folder_name:
+            await query.edit_message_text("Папка не найдена.")
+            return
+        folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
+        videos = [f for f in os.listdir(folder_path) if f.endswith((".mp4", ".avi", ".mov"))]
+        if not videos:
+            await query.edit_message_text(f"В папке '{folder_name}' нет видео.")
+            return
+        # Формируем карту id -> имя файла
+        video_map = {}
+        keyboard = []
+        for i, video in enumerate(videos):
+            video_id = f"v{i}_{hashlib.md5(video.encode()).hexdigest()[:8]}"
+            video_map[video_id] = video
+            keyboard.append([
+                InlineKeyboardButton(f"🗑 {video}", callback_data=f"delete_video_{video_id}")
+            ])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="delete_video_back_to_folders")])
+        context.user_data['delete_video_map'] = video_map
+        context.user_data['delete_selected_folder_id'] = folder_id
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"Выберите видео для удаления из папки '{folder_name}':",
+            reply_markup=reply_markup
+        )
+        return
+    elif callback_data == "delete_video_back_to_folders":
+        # Показываем список папок заново
+        folders = [f for f in os.listdir(config.RESOURCES_DIR) if os.path.isdir(os.path.join(config.RESOURCES_DIR, f))]
+        if not folders:
+            await query.edit_message_text("Нет доступных папок для удаления видео.")
+            return
+        folder_map = {}
+        keyboard = []
+        for i, folder in enumerate(folders):
+            folder_id = f"f{i}_{hashlib.md5(folder.encode()).hexdigest()[:8]}"
+            folder_map[folder_id] = folder
+            keyboard.append([
+                InlineKeyboardButton(f"📁 {folder}", callback_data=f"delete_folder_{folder_id}")
+            ])
+        context.user_data['delete_folder_map'] = folder_map
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "Выберите папку для удаления видео:",
+            reply_markup=reply_markup
+        )
+        return
+    elif callback_data.startswith("delete_video_"):
+        video_id = callback_data.replace("delete_video_", "")
+        video_map = context.user_data.get('delete_video_map', {})
+        folder_map = context.user_data.get('delete_folder_map', {})
+        folder_id = context.user_data.get('delete_selected_folder_id')
+        folder_name = folder_map.get(folder_id)
+        video_name = video_map.get(video_id)
+        if not folder_name or not video_name:
+            await query.answer("❌ Видео не найдено")
+            return
+        folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
+        video_path = os.path.join(folder_path, video_name)
+        try:
+            os.remove(video_path)
+            await query.answer(f"✅ Видео '{video_name}' удалено")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении видео: {e}")
+            await query.answer("❌ Ошибка при удалении видео")
+            return
+        # Обновляем список видео
+        videos = [f for f in os.listdir(folder_path) if f.endswith((".mp4", ".avi", ".mov"))]
+        if not videos:
+            await query.edit_message_text(f"✅ Все видео из папки '{folder_name}' удалены.")
+            return
+        # Формируем новую карту и клавиатуру
+        video_map = {}
+        keyboard = []
+        for i, video in enumerate(videos):
+            vid_id = f"v{i}_{hashlib.md5(video.encode()).hexdigest()[:8]}"
+            video_map[vid_id] = video
+            keyboard.append([
+                InlineKeyboardButton(f"🗑 {video}", callback_data=f"delete_video_{vid_id}")
+            ])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="delete_video_back_to_folders")])
+        context.user_data['delete_video_map'] = video_map
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"Выберите видео для удаления из папки '{folder_name}':",
+            reply_markup=reply_markup
+        )
+        return
     elif callback_data == "clear_confirm":
         # Очистка чата
         try:
@@ -549,121 +659,6 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Извините, произошла ошибка при очистке чата.")
     elif callback_data == "clear_cancel":
         await query.edit_message_text("❌ Очистка чата отменена.")
-    elif callback_data == "cancel_delete_video":
-        await query.edit_message_text("❌ Удаление видео отменено.")
-    elif callback_data.startswith("select_delete_folder_"):
-        # Показываем список видео в выбранной папке
-        folder_name = callback_data.replace("select_delete_folder_", "")
-        folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
-        
-        try:
-            videos = [f for f in os.listdir(folder_path) 
-                     if f.endswith(('.mp4', '.avi', '.mov'))]
-            
-            if not videos:
-                await query.edit_message_text(f"❌ В папке '{folder_name}' нет видео.")
-                return
-            
-            keyboard = []
-            for video in videos:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"🗑 {video}", 
-                        callback_data=f"delete_video;{folder_name};{video}"
-                    )
-                ])
-            
-            # Добавляем кнопки управления
-            keyboard.append([
-                InlineKeyboardButton("✅ Завершить удаление", callback_data="finish_delete_video"),
-                InlineKeyboardButton("◀️ Назад к папкам", callback_data="back_to_folders_delete")
-            ])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                f"Выберите видео для удаления из папки '{folder_name}':",
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при получении списка видео: {e}")
-            await query.edit_message_text("Извините, произошла ошибка при получении списка видео.")
-    elif callback_data.startswith("delete_video"):
-        # Удаляем выбранное видео
-        _, folder_name, video_name = callback_data.split(";", 2)
-        video_path = os.path.join(config.RESOURCES_DIR, folder_name, video_name)
-        
-        try:
-            logger.info(f"Attempting to delete video at path: {video_path}")
-            if os.path.exists(video_path):
-                os.remove(video_path)
-                await query.answer(f"✅ Видео '{video_name}' удалено")
-                
-                # Обновляем список видео
-                videos = [f for f in os.listdir(os.path.join(config.RESOURCES_DIR, folder_name)) 
-                         if f.endswith(('.mp4', '.avi', '.mov'))]
-                
-                if not videos:
-                    await query.edit_message_text(f"✅ Все видео из папки '{folder_name}' удалены.")
-                    return
-                
-                keyboard = []
-                for video in videos:
-                    keyboard.append([
-                        InlineKeyboardButton(
-                            f"🗑 {video}", 
-                            callback_data=f"delete_video;{folder_name};{video}"
-                        )
-                    ])
-                
-                keyboard.append([
-                    InlineKeyboardButton("✅ Завершить удаление", callback_data="finish_delete_video"),
-                    InlineKeyboardButton("◀️ Назад к папкам", callback_data="back_to_folders_delete")
-                ])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(
-                    f"Выберите видео для удаления из папки '{folder_name}':",
-                    reply_markup=reply_markup
-                )
-            else:
-                logger.error(f"Video file not found at path: {video_path}")
-                await query.answer("❌ Видео не найдено")
-        except Exception as e:
-            logger.error(f"Ошибка при удалении видео: {e}")
-            await query.answer("❌ Ошибка при удалении видео")
-    elif callback_data == "finish_delete_video":
-        await query.edit_message_text("✅ Удаление видео завершено.")
-    elif callback_data == "back_to_folders_delete":
-        # Показываем список папок снова
-        try:
-            folders = [f for f in os.listdir(config.RESOURCES_DIR) 
-                      if os.path.isdir(os.path.join(config.RESOURCES_DIR, f))]
-            
-            if not folders:
-                await query.edit_message_text("Нет доступных папок для удаления видео.")
-                return
-
-            keyboard = []
-            for folder in folders:
-                videos = [f for f in os.listdir(os.path.join(config.RESOURCES_DIR, folder)) 
-                         if f.endswith(('.mp4', '.avi', '.mov'))]
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📁 {folder} ({len(videos)} видео)", 
-                        callback_data=f"select_delete_folder_{folder}"
-                    )
-                ])
-            
-            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_delete_video")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                "Выберите папку для удаления видео:",
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при показе списка папок: {e}")
-            await query.edit_message_text("Извините, произошла ошибка при получении списка папок.")
     elif callback_data.startswith("save_"):
         # Обработка выбора папки
         folder_name = callback_data.replace("save_", "")
@@ -702,7 +697,6 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Извините, произошла ошибка при удалении папки."
             )
     elif callback_data.startswith("view_"):
-        # Просмотр видео в папке
         folder_name = callback_data.replace("view_", "")
         folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
         
@@ -714,19 +708,21 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"В папке '{folder_name}' нет видео.")
                 return
             
-            # Создаем клавиатуру с видео
+            # Создаем file_map и клавиатуру с видео
+            file_map = {get_file_id(folder_name, v): v for v in videos}
+            context.user_data[f"file_map_{folder_name}"] = file_map
             keyboard = []
-            for video in videos:
+            for file_id, video in file_map.items():
                 keyboard.append([
                     InlineKeyboardButton(
                         f"🎥 {video}", 
-                        callback_data=f"play_{folder_name}_{video}"
+                        callback_data=safe_callback_data("play", file_id)
                     )
                 ])
             
             # Добавляем кнопки управления
             keyboard.append([
-                InlineKeyboardButton("📤 Отправить все видео", callback_data=f"send_all_{folder_name}"),
+                InlineKeyboardButton("📤 Отправить все видео", callback_data=safe_callback_data("send_all", folder_name)),
                 InlineKeyboardButton("◀️ Назад к папкам", callback_data="back_to_folders")
             ])
             
@@ -741,10 +737,12 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Извините, произошла ошибка при получении списка видео."
             )
     elif callback_data.startswith("play_"):
-        # Воспроизведение выбранного видео
-        _, folder_name, video_name = callback_data.split("_", 2)
+        _, file_id = callback_data.split("_", 1)
+        folder_name, video_name = find_file_by_id(file_id)
+        if not folder_name or not video_name:
+            await query.edit_message_text("Ошибка: видео не найдено.")
+            return
         video_path = os.path.join(config.RESOURCES_DIR, folder_name, video_name)
-        
         try:
             with open(video_path, 'rb') as video_file:
                 await query.message.reply_video(
@@ -757,23 +755,21 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Извините, произошла ошибка при отправке видео."
             )
     elif callback_data.startswith("send_all_"):
-        # Отправка всех видео из папки
         folder_name = callback_data.replace("send_all_", "")
         folder_path = os.path.join(config.RESOURCES_DIR, folder_name)
-        
         try:
             videos = [f for f in os.listdir(folder_path) 
                      if f.endswith(('.mp4', '.avi', '.mov'))]
-            
             if not videos:
                 await query.edit_message_text(f"В папке '{folder_name}' нет видео.")
                 return
-            
+            # Сохраняем file_map для этой папки
+            file_map = {get_file_id(folder_name, v): v for v in videos}
+            context.user_data[f"file_map_{folder_name}"] = file_map
             # Отправляем сообщение о начале отправки
             status_message = await query.message.reply_text(
                 f"Начинаю отправку {len(videos)} видео из папки '{folder_name}'..."
             )
-            
             # Отправляем видео по одному
             for i, video in enumerate(videos, 1):
                 try:
@@ -783,7 +779,6 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             video=video_file,
                             caption=f"🎥 {video} ({i}/{len(videos)})"
                         )
-                    
                     # Обновляем статус
                     await status_message.edit_text(
                         f"Отправлено {i} из {len(videos)} видео..."
@@ -794,12 +789,10 @@ async def folder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Ошибка при отправке видео {video}. Продолжаю отправку..."
                     )
                     continue
-            
             # Финальное сообщение
             await status_message.edit_text(
                 f"✅ Все видео из папки '{folder_name}' успешно отправлены!"
             )
-            
         except Exception as e:
             logger.error(f"Ошибка при отправке всех видео: {e}")
             await query.edit_message_text(
@@ -946,11 +939,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         context.user_data['waiting_for_url'] = False
+        context.user_data.clear()
         
     except Exception as e:
         logger.error(f"Ошибка при загрузке видео: {e}")
         await update.message.reply_text("❌ Произошла ошибка при загрузке видео. Проверьте ссылку и попробуйте снова.")
-        context.user_data['waiting_for_url'] = False
+        context.user_data.clear()
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel current operation and clear user context."""
+    context.user_data.clear()
+    await update.message.reply_text("Операция отменена. Контекст очищен.")
 
 def main():
     """Start the bot."""
@@ -976,6 +975,7 @@ def main():
     application.add_handler(CommandHandler("delete_video", delete_video))
     application.add_handler(CommandHandler("clear", clear_chat))
     application.add_handler(CommandHandler("download_from_url", download_from_url))
+    application.add_handler(CommandHandler("cancel", cancel))
     
     # Add video handler
     application.add_handler(MessageHandler(filters.VIDEO, handle_video))
@@ -990,4 +990,9 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main() 
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("⏹️ Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
